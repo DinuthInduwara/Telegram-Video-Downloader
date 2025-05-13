@@ -1,92 +1,105 @@
-from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, BarColumn, TextColumn, TimeRemainingColumn, TotalFileSizeColumn, TransferSpeedColumn, DownloadColumn
-from telethon import TelegramClient
-import asyncio
-from os import path
-
+import socket
 import re
+from os import path, makedirs
+import asyncio
+from telethon import TelegramClient
+from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn, BarColumn, TextColumn, TimeRemainingColumn, TotalFileSizeColumn, TransferSpeedColumn, DownloadColumn
+
 
 DOWNLOAD_FOLDER = "./downloads"
-
 api_id = "7122114"
 api_hash = "3ff382cb976bdf8aead9359f2c352ac1"
 bot_token = "1988869232:AAEZl3nmyyz-NRRDD9mX3wpnYnM9EUBghjY"
-
-# Dummy implementations for demonstration.
-# In your program, these functions will be defined with your actual logic.
-
 chat_id = 2294699723
 client = TelegramClient('ChannelDownloadBot_V2', api_id, api_hash)
 
 
 def gather_links():
-    links = list()
-    print("Enter Video Links: \n\t\t Enter `e` to exit..! ")
-
+    links = []
+    print("Enter Video Links: (enter 'e' to finish)")
     while True:
-        url = input()
-        if url == "e" or url == "E":
+        url = input().strip()
+        if url.lower() == 'e':
             break
         links.append(url)
-
     return links
 
 
-def sanitize_filename(filename):
-    """Sanitizes filenames by removing invalid characters and trimming spaces."""
-    filename = filename.replace(
-        "\n", " ").strip()  # Remove newlines and trim spaces
+def sanitize_filename(filename: str) -> str:
+    filename = filename.replace("\n", " ").strip()
     return re.sub(r'[\\/*?:"<>|]', '_', filename)
 
 
-async def download_file(link, progress):
-    """
-    Download a file from the given Telegram link with a progress bar.
-    """
-    sp = link.split("/")
-    channel = sp[3]  # Extract channel name
-    message_id = int(sp[-1])  # Extract message ID
+def check_internet(host="8.8.8.8", port=53, timeout=3) -> bool:
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+        return True
+    except Exception:
+        return False
 
-    # Fetch the message
+
+async def download_file(link: str, progress: Progress):
+    sp = link.split('/')
+    channel = sp[3]
+    message_id = int(sp[-1])
     message = await client.get_messages(channel, ids=message_id)
-
-    # Create a progress bar task
-    task = progress.add_task(f"Downloading {message_id}", total=100)
-
-    # Download the media with progress tracking
-    async def progress_callback(done, total):
-        # Set actual total size only once
-        if total and progress.tasks[task].total == 100:
-            progress.update(task, total=total)
-        progress.update(task, completed=done)
-
     safe_filename = sanitize_filename(message.text)
     video_path = path.join(DOWNLOAD_FOLDER, f"{safe_filename}.mp4")
 
-    await client.download_media(message, file=video_path, progress_callback=progress_callback)
-    progress.update(task, completed=100)
+    # Ensure download folder exists
+    if not path.exists(DOWNLOAD_FOLDER):
+        makedirs(DOWNLOAD_FOLDER)
+
+    # Determine starting offset from existing file
+    offset = path.getsize(video_path) if path.exists(video_path) else 0
+    file_size = message.video.size or message.file.size
+    task = progress.add_task(
+        f"Downloading {message_id}", total=file_size, completed=offset)
+
+    # Stream download in chunks, resuming from offset
+    while offset < file_size:
+        try:
+            async for chunk in client.iter_download(
+                message.document or message.video,
+                offset=offset,
+                chunk_size=1024 * 64,
+                file_size=file_size
+            ):
+                # Write chunk
+                mode = 'r+b' if path.exists(video_path) else 'wb'
+                with open(video_path, mode) as f:
+                    f.seek(offset)
+                    f.write(chunk)
+                offset += len(chunk)
+                progress.update(task, completed=offset)
+            break
+
+        except (asyncio.TimeoutError, ConnectionError):
+            print(
+                f"\nDownload interrupted at {offset} bytes. Checking connection...")
+            while not check_internet():
+                print("No internet. Sleeping for 5 seconds...")
+                await asyncio.sleep(5)
+            print("Internet restored. Resuming...")
+        except Exception as e:
+            print(f"Unexpected error: {e}. Retrying in 5 seconds...")
+            await asyncio.sleep(5)
 
 
 async def main():
-    """
-    Entry point of the program.
-    Wraps the main menu function in curses.wrapper to ensure proper initialization and cleanup.
-    """
-    links = gather_links()  # Collect links
-
+    links = gather_links()
     await client.start()
 
-    # Get the number of concurrent downloads
     while True:
         try:
-            threds = int(
-                input("How many tasks to run at the same time? (1-4): "))
-            if 1 <= threds <= 4:
+            threads = int(input("Concurrent downloads (1-4): "))
+            if 1 <= threads <= 4:
                 break
         except ValueError:
             pass
-        print("Invalid input. Please enter a number between 1 and 4.")
+        print("Enter a number between 1 and 4.")
 
-    # Progress Bar Setup
     with Progress(
         SpinnerColumn(),
         "{task.description}",
@@ -95,21 +108,17 @@ async def main():
         DownloadColumn(),
         TransferSpeedColumn(),
         BarColumn(bar_width=50),
-        " ",
-        TextColumn("[bold]{task.percentage:>3.0f}%", justify="right"),
-        " ",
+        TextColumn("[bold]{task.percentage:>3.0f}%")
     ) as progress:
-        # Create a list of tasks
-        tasks = [download_file(link, progress) for link in links]
+        semaphore = asyncio.Semaphore(threads)
+        tasks = []
+        for link in links:
+            async def sem_task(l):
+                async with semaphore:
+                    await download_file(l, progress)
+            tasks.append(sem_task(link))
 
-        # Run tasks with concurrency limit
-        semaphore = asyncio.Semaphore(threds)
-
-        async def limited_task(task):
-            async with semaphore:
-                await task
-
-        await asyncio.gather(*(limited_task(task) for task in tasks))
+        await asyncio.gather(*tasks)
 
     print("All downloads completed!")
 

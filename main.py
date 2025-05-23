@@ -59,32 +59,32 @@ async def download_file(link: str, progress: Progress):
 
     # Stream download in chunks, resuming from offset
     while offset < file_size:
-        try:
-            async for chunk in client.iter_download(
-                message.document or message.video,
-                offset=offset,
-                chunk_size=1024 * 64,
-                file_size=file_size
-            ):
-                # Write chunk
-                mode = 'r+b' if path.exists(video_path) else 'wb'
-                with open(video_path, mode) as f:
-                    f.seek(offset)
+        mode = 'r+b' if path.exists(video_path) else 'wb'
+        with open(video_path, mode) as f:
+            f.seek(offset)
+            try:
+                async for chunk in client.iter_download(
+                    message.document or message.video,
+                    offset=offset,
+                    chunk_size=1024 * 64,
+                    file_size=file_size
+                ):
+                    # Write chunk
                     f.write(chunk)
-                offset += len(chunk)
-                progress.update(task, completed=offset)
-            break
+                    offset += len(chunk)
+                    progress.update(task, completed=offset)
+                break
 
-        except (asyncio.TimeoutError, ConnectionError):
-            print(
-                f"\nDownload interrupted at {offset} bytes. Checking connection...")
-            while not check_internet():
-                print("No internet. Sleeping for 5 seconds...")
+            except (asyncio.TimeoutError, ConnectionError):
+                print(
+                    f"\nDownload interrupted at {offset} bytes. Checking connection...")
+                while not check_internet():
+                    print("No internet. Sleeping for 5 seconds...")
+                    await asyncio.sleep(5)
+                print("Internet restored. Resuming...")
+            except Exception as e:
+                print(f"Unexpected error: {e}. Retrying in 5 seconds...")
                 await asyncio.sleep(5)
-            print("Internet restored. Resuming...")
-        except Exception as e:
-            print(f"Unexpected error: {e}. Retrying in 5 seconds...")
-            await asyncio.sleep(5)
 
 
 async def main():
